@@ -1,0 +1,90 @@
+import os
+import urllib.parse
+import hashlib
+import hmac
+import datetime
+
+# ========== Config ==========
+region = 'us-east-1'
+host = 'your-db-instance.123456789012.us-east-1.rds.amazonaws.com'
+port = 3306
+db_user = 'your_db_username'
+access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+session_token = os.environ.get('AWS_SESSION_TOKEN')  # Optional
+
+if not access_key or not secret_key:
+    raise Exception("Missing AWS credentials in environment variables.")
+
+# ========== Time Info ==========
+t = datetime.datetime.utcnow()
+amz_date = t.strftime('%Y%m%dT%H%M%SZ')
+date_stamp = t.strftime('%Y%m%d')
+
+# ========== Canonical Request ==========
+method = 'GET'
+service = 'rds-db'
+canonical_uri = '/'
+canonical_querystring = f'Action=connect&DBUser={urllib.parse.quote(db_user)}'
+
+canonical_headers = f'host:{host}\n' + f'x-amz-date:{amz_date}\n'
+if session_token:
+    canonical_headers += f'x-amz-security-token:{session_token}\n'
+
+signed_headers = 'host;x-amz-date'
+if session_token:
+    signed_headers += ';x-amz-security-token'
+
+payload_hash = 'UNSIGNED-PAYLOAD'
+
+canonical_request = '\n'.join([
+    method,
+    canonical_uri,
+    canonical_querystring,
+    canonical_headers,
+    signed_headers,
+    payload_hash
+])
+
+# ========== String to Sign ==========
+algorithm = 'AWS4-HMAC-SHA256'
+credential_scope = f'{date_stamp}/{region}/{service}/aws4_request'
+hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+
+string_to_sign = '\n'.join([
+    algorithm,
+    amz_date,
+    credential_scope,
+    hashed_request
+])
+
+# ========== Signing Key ==========
+def sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+k_date = sign(f"AWS4{secret_key}".encode('utf-8'), date_stamp)
+k_region = sign(k_date, region)
+k_service = sign(k_region, service)
+k_signing = sign(k_service, 'aws4_request')
+
+signature = hmac.new(k_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+
+# ========== Final Token ==========
+params = {
+    'Action': 'connect',
+    'DBUser': db_user,
+    'X-Amz-Algorithm': algorithm,
+    'X-Amz-Credential': f'{access_key}/{credential_scope}',
+    'X-Amz-Date': amz_date,
+    'X-Amz-Expires': '900',
+    'X-Amz-SignedHeaders': signed_headers,
+    'X-Amz-Signature': signature
+}
+
+if session_token:
+    params['X-Amz-Security-Token'] = session_token
+
+query_string = '&'.join(f'{urllib.parse.quote(k)}={urllib.parse.quote(v)}' for k, v in params.items())
+token = f'https://{host}:{port}/?{query_string}'
+
+print("Generated RDS Auth Token:\n", token)
