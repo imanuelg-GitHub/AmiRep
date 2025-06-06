@@ -1,0 +1,75 @@
+use strict;
+use warnings;
+use URI::Escape;
+use Digest::SHA qw(hmac_sha256 hmac_sha256_hex sha256_hex);
+use POSIX qw(strftime);
+use MIME::Base64;
+
+# ========== Config ==========
+my $region = 'us-east-1';
+my $host = 'your-db-instance.123456789012.us-east-1.rds.amazonaws.com';
+my $port = 3306;
+my $db_user = 'your_db_username';
+my $access_key = $ENV{'AWS_ACCESS_KEY_ID'};
+my $secret_key = $ENV{'AWS_SECRET_ACCESS_KEY'};
+my $token = $ENV{'AWS_SESSION_TOKEN'}; # Optional (if using temporary creds)
+
+# ========== Validations ==========
+die "Missing AWS_ACCESS_KEY_ID\n" unless $access_key;
+die "Missing AWS_SECRET_ACCESS_KEY\n" unless $secret_key;
+
+# ========== Time Info ==========
+my $amz_date = strftime("%Y%m%dT%H%M%SZ", gmtime());
+my $date_stamp = strftime("%Y%m%d", gmtime());
+
+# ========== Canonical Request ==========
+my $method = 'GET';
+my $service = 'rds-db';
+my $canonical_uri = '/';
+my $query = "Action=connect&DBUser=" . uri_escape($db_user);
+my $headers = "host:$host\nx-amz-date:$amz_date\n";
+$headers .= "x-amz-security-token:$token\n" if $token;
+my $signed_headers = "host;x-amz-date";
+$signed_headers .= ";x-amz-security-token" if $token;
+my $payload_hash = "UNSIGNED-PAYLOAD";
+
+my $canonical_request = join("\n",
+    $method,
+    $canonical_uri,
+    $query,
+    $headers,
+    $signed_headers,
+    $payload_hash
+);
+
+# ========== String to Sign ==========
+my $algorithm = "AWS4-HMAC-SHA256";
+my $scope = "$date_stamp/$region/$service/aws4_request";
+my $string_to_sign = join("\n",
+    $algorithm,
+    $amz_date,
+    $scope,
+    sha256_hex($canonical_request)
+);
+
+# ========== Signing Key ==========
+sub sign { hmac_sha256($_[1], $_[0]) }
+
+my $kDate = sign("AWS4$secret_key", $date_stamp);
+my $kRegion = sign($kDate, $region);
+my $kService = sign($kRegion, $service);
+my $kSigning = sign($kService, "aws4_request");
+
+my $signature = hmac_sha256_hex($string_to_sign, $kSigning);
+
+# ========== Build Final Token ==========
+my $url = "https://$host:$port/?$query";
+$url .= "&X-Amz-Algorithm=$algorithm";
+$url .= "&X-Amz-Credential=" . uri_escape("$access_key/$scope");
+$url .= "&X-Amz-Date=$amz_date";
+$url .= "&X-Amz-Expires=900";
+$url .= "&X-Amz-SignedHeaders=$signed_headers";
+$url .= "&X-Amz-Signature=$signature";
+$url .= "&X-Amz-Security-Token=" . uri_escape($token) if $token;
+
+print "Generated RDS Auth Token:\n$url\n";
